@@ -17,3 +17,4 @@ CLI tool for music similarity search using CLAP embeddings and vector similarity
 | `MUSICMATCH_DB_PATH` | `music_vectors.db` | Path to the vector database |
 | `MUSICMATCH_TOP_K` | `5` | Default number of results |
 | `MUSICMATCH_MPD_MUSIC_DIR` | `~/Music` | Music directory root for MPD |
+| `MUSICMATCH_MAX_DURATION_MINUTES` | `12` | Skip files longer than this when indexing |
