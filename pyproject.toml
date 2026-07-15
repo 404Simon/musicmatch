@@ -1,0 +1,26 @@
+[project]
+name = "musicmatch"
+version = "0.1.0"
+description = "Music similarity CLI using CLAP embeddings and Turso vector search"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "click>=8.0",
+    "librosa>=0.10",
+    "numpy>=1.24",
+    "pyturso>=0.7.0",
+    "soundfile>=0.12",
+    "torch>=2.0",
+    "tqdm>=4.65",
+    "transformers>=4.30",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true
+
+[project.scripts]
+musicmatch = "musicmatch.cli:cli"
