@@ -4,24 +4,31 @@ import subprocess
 from glob import glob
 
 import click
+import librosa
 import numpy as np
 import turso
 from tqdm import tqdm
 
 from musicmatch.audio import load_and_chunk
-from musicmatch.config import AUDIO_EXTENSIONS, DB_PATH, MPD_MUSIC_DIR, TOP_K
+from musicmatch.config import AUDIO_EXTENSIONS, DB_PATH, MAX_DURATION_MINUTES, MPD_MUSIC_DIR, TOP_K
 from musicmatch.db import get_file_embedding, group_and_score, init_db, insert_chunk, is_empty, search as db_search
+from musicmatch.debug import debug, rss, set_verbose as set_debug_verbose
 from musicmatch.model import get_audio_embeddings, get_text_embedding
 
 
 @click.group()
-def cli():
-    pass
+@click.option("--verbose", "-v", is_flag=True, help="Enable debug output")
+def cli(verbose: bool):
+    if verbose:
+        set_debug_verbose(True)
+        debug("Verbose mode enabled", tag="cli")
 
 
 @cli.command()
 @click.argument("directory", type=click.Path(exists=True, file_okay=False), default=os.path.expanduser("~/Music"), required=False)
 def index(directory: str):
+    debug(f"RSS at start: {rss()}", tag="index")
+
     files: list[str] = []
     for ext in AUDIO_EXTENSIONS:
         files.extend(glob(os.path.join(directory, "**", f"*{ext}"), recursive=True))
@@ -30,6 +37,7 @@ def index(directory: str):
         click.echo("No audio files found.")
         raise SystemExit(0)
 
+    debug(f"Found {len(files)} audio files. RSS: {rss()}", tag="index")
     init_db()
 
     with turso.connect(DB_PATH) as con:
@@ -47,19 +55,34 @@ def index(directory: str):
             click.echo("All files already indexed.")
             return
 
+        debug(f"New files to index: {len(new_files)}. RSS: {rss()}", tag="index")
+
+        max_sec = MAX_DURATION_MINUTES * 60
+        indexed = 0
         for filepath in tqdm(new_files, desc="Indexing"):
+            try:
+                duration = librosa.get_duration(path=filepath)
+            except Exception as e:
+                click.echo(f"  Skipping {filepath}: {e}", err=True)
+                continue
+            if duration > max_sec:
+                debug(f"Skipping {filepath}: {duration/60:.1f}min > {MAX_DURATION_MINUTES}min limit", tag="index")
+                continue
             try:
                 chunks = load_and_chunk(filepath)
             except Exception as e:
                 click.echo(f"  Skipping {filepath}: {e}", err=True)
                 continue
             chunk_arrays = [c for _, _, c in chunks]
+            debug(f"{filepath}: {len(chunks)} chunks. RSS: {rss()}", tag="index")
             embeddings = get_audio_embeddings(chunk_arrays)
             for (chunk_idx, start_time, _), emb in zip(chunks, embeddings):
                 insert_chunk(con, filepath, chunk_idx, start_time, emb)
             con.commit()
+            indexed += 1
 
-    click.echo(f"Done. Indexed {len(new_files)} file(s).")
+    debug(f"Final RSS: {rss()}", tag="index")
+    click.echo(f"Done. Indexed {indexed} file(s).")
 
 
 @cli.command()
