@@ -4,13 +4,7 @@ import subprocess
 from glob import glob
 
 import click
-import numpy as np
-import turso
-from tqdm import tqdm
 
-from musicmatch import hash as hashmod
-from musicmatch import matchignore
-from musicmatch.audio import load_audio, chunk_audio, load_and_chunk
 from musicmatch.config import (
     AUDIO_EXTENSIONS,
     DB_PATH,
@@ -19,19 +13,10 @@ from musicmatch.config import (
     SAMPLE_RATE,
     TOP_K,
 )
-from musicmatch.db import (
-    get_file_embedding,
-    group_and_score,
-    init_db,
-    insert_chunk,
-    is_empty,
-    search as db_search,
-)
 from musicmatch.debug import debug, rss, set_verbose as set_debug_verbose
-from musicmatch.model import get_audio_embeddings, get_text_embedding
 
 
-@click.group()
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug output")
 @click.option("--no-ignore", is_flag=True, help="Disable .matchignore filtering")
 def cli(verbose: bool, no_ignore: bool):
@@ -39,6 +24,8 @@ def cli(verbose: bool, no_ignore: bool):
         set_debug_verbose(True)
         debug("Verbose mode enabled", tag="cli")
     if no_ignore:
+        from musicmatch import matchignore
+
         matchignore.set_enabled(False)
 
 
@@ -50,6 +37,14 @@ def cli(verbose: bool, no_ignore: bool):
     required=False,
 )
 def index(directory: str):
+    from musicmatch import hash as hashmod
+    from musicmatch import matchignore
+    from musicmatch.audio import load_audio, chunk_audio
+    from musicmatch.db import init_db, insert_chunk
+    from musicmatch.model import get_audio_embeddings
+    import turso
+    from tqdm import tqdm
+
     debug(f"RSS at start: {rss()}", tag="index")
 
     files: list[str] = []
@@ -133,6 +128,9 @@ def index(directory: str):
 
 @cli.command()
 def list_files():
+    from musicmatch.db import init_db
+    import turso
+
     init_db()
     with turso.connect(DB_PATH) as con:
         rows = (
@@ -152,6 +150,11 @@ def list_files():
 @cli.command()
 @click.argument("query")
 def search(query: str):
+    from musicmatch import matchignore
+    from musicmatch.db import init_db, is_empty, search as db_search
+    from musicmatch.model import get_text_embedding
+    import turso
+
     init_db()
     embedding = get_text_embedding(query)
 
@@ -184,6 +187,15 @@ def search(query: str):
 @cli.command()
 @click.argument("filepath", type=click.Path(exists=True, dir_okay=False))
 def similar(filepath: str):
+    import numpy as np
+
+    from musicmatch import hash as hashmod
+    from musicmatch import matchignore
+    from musicmatch.audio import load_and_chunk
+    from musicmatch.db import init_db, is_empty, search as db_search, group_and_score
+    from musicmatch.model import get_audio_embeddings
+    import turso
+
     init_db()
     chunks = load_and_chunk(filepath)
     embeddings = get_audio_embeddings([c for _, _, c in chunks])
@@ -227,6 +239,20 @@ def similar(filepath: str):
 )
 def rmpc(amount: int, all_flag: bool):
     """Find similar songs to the currently playing song and add them to the rmpc queue."""
+    import numpy as np
+
+    from musicmatch import hash as hashmod
+    from musicmatch import matchignore
+    from musicmatch.audio import load_and_chunk
+    from musicmatch.db import (
+        init_db,
+        get_file_embedding,
+        search as db_search,
+        group_and_score,
+    )
+    from musicmatch.model import get_audio_embeddings
+    import turso
+
     result = subprocess.run(["rmpc", "queue"], capture_output=True, text=True)
     if result.returncode != 0:
         click.echo("Failed to get current queue from rmpc.", err=True)
