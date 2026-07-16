@@ -8,6 +8,7 @@ import numpy as np
 import turso
 from tqdm import tqdm
 
+from musicmatch import hash as hashmod
 from musicmatch import matchignore
 from musicmatch.audio import load_audio, chunk_audio, load_and_chunk
 from musicmatch.config import (
@@ -63,6 +64,15 @@ def index(directory: str):
     init_db()
 
     with turso.connect(DB_PATH) as con:
+        missing_hash = hashmod.get_filepaths_missing_hashes(con)
+        if missing_hash:
+            click.echo(f"Backfilling hashes for {len(missing_hash)} file(s)...")
+            for fp in tqdm(missing_hash, desc="Backfilling hashes"):
+                fp_hash = hashmod.compute_fingerprint(fp)
+                if fp_hash:
+                    hashmod.store_hash(con, fp, fp_hash)
+            con.commit()
+
         existing = {
             r[0]
             for r in con.cursor()
@@ -87,6 +97,13 @@ def index(directory: str):
         max_sec = MAX_DURATION_MINUTES * 60
         indexed = 0
         for filepath in tqdm(new_files, desc="Indexing"):
+            fp_hash = hashmod.compute_fingerprint(filepath)
+            if fp_hash:
+                dup = hashmod.get_filepath_by_hash(con, fp_hash)
+                if dup and dup != filepath:
+                    click.echo(f"  Skipping {filepath}: duplicate of {dup}", err=True)
+                    continue
+
             try:
                 audio = load_audio(filepath)
             except Exception as e:
@@ -105,6 +122,8 @@ def index(directory: str):
             embeddings = get_audio_embeddings(chunk_arrays)
             for (chunk_idx, start_time, _), emb in zip(chunks, embeddings):
                 insert_chunk(con, filepath, chunk_idx, start_time, emb)
+            if fp_hash:
+                hashmod.store_hash(con, filepath, fp_hash)
             con.commit()
             indexed += 1
 
@@ -176,11 +195,13 @@ def similar(filepath: str):
             return
         rows = db_search(con, avg_embedding, top_k=100, exclude_filepath=filepath)
 
-    if not rows:
-        click.echo("No similar files found.")
-        return
+        if not rows:
+            click.echo("No similar files found.")
+            return
 
-    scored = group_and_score(rows, TOP_K)
+        scored = group_and_score(rows, TOP_K)
+        scored = hashmod.dedup_by_hash(con, scored)
+
     mpd_root = os.path.expanduser(MPD_MUSIC_DIR)
     scored = [
         (fp, d)
@@ -253,16 +274,11 @@ def rmpc(amount: int, all_flag: bool):
             if scored:
                 all_scored.extend(scored)
 
-    if not all_scored:
-        click.echo("No similar files found.")
-        return
+        if not all_scored:
+            click.echo("No similar files found.")
+            return
 
-    seen = set()
-    deduped = []
-    for fp, d in all_scored:
-        if fp not in seen:
-            seen.add(fp)
-            deduped.append((fp, d))
+        deduped = hashmod.dedup_by_hash(con, all_scored)
 
     rel_paths = [os.path.relpath(fp, mpd_root) for fp, _ in deduped]
     subprocess.run(["rmpc", "add", *rel_paths])

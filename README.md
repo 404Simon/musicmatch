@@ -20,6 +20,19 @@ CLI tool for music similarity search using CLAP embeddings and vector similarity
 | `MUSICMATCH_MAX_DURATION_MINUTES` | `12` | Skip files longer than this when indexing |
 | `MUSICMATCH_MATCHIGNORE_PATH` | `~/.matchignore` | Path to the matchignore file |
 
+## Content-Hash Dedup
+
+MusicMatch computes an [AcoustID](https://acoustid.org/) fingerprint (chromaprint) for each indexed file. This allows the same audio content to be recognized even if it exists under different filepaths and formats.
+
+- During `index`, fingerprints are computed and stored. If a file's fingerprint matches an already-indexed file, indexing is skipped with a warning.
+- In `similar` and `rmpc` results, duplicates by content hash are removed — only the result with the best (lowest) distance per unique track is kept.
+
+**System requirement:** `libchromaprint` (or `fpcalc` binary). Install via your package manager:
+
+- Debian/Ubuntu: `sudo apt install libchromaprint-tools`
+- macOS: `brew install chromaprint`
+- Arch: `sudo pacman -S chromaprint`
+
 ## `.matchignore`
 
 **Usage:** `musicmatch --no-ignore` disables it globally.

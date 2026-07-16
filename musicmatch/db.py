@@ -1,6 +1,7 @@
 import numpy as np
 
 from musicmatch.config import DB_PATH
+from musicmatch import hash as hashmod
 
 
 def init_db():
@@ -17,6 +18,7 @@ def init_db():
                 embedding F32_BLOB(512)
             )"""
         )
+        hashmod.init_hash_table(con)
         con.commit()
 
 
