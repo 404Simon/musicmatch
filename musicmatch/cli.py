@@ -4,13 +4,12 @@ import subprocess
 from glob import glob
 
 import click
-import librosa
 import numpy as np
 import turso
 from tqdm import tqdm
 
-from musicmatch.audio import load_and_chunk
-from musicmatch.config import AUDIO_EXTENSIONS, DB_PATH, MAX_DURATION_MINUTES, MPD_MUSIC_DIR, TOP_K
+from musicmatch.audio import load_audio, chunk_audio, load_and_chunk
+from musicmatch.config import AUDIO_EXTENSIONS, DB_PATH, MAX_DURATION_MINUTES, MPD_MUSIC_DIR, SAMPLE_RATE, TOP_K
 from musicmatch.db import get_file_embedding, group_and_score, init_db, insert_chunk, is_empty, search as db_search
 from musicmatch.debug import debug, rss, set_verbose as set_debug_verbose
 from musicmatch.model import get_audio_embeddings, get_text_embedding
@@ -61,18 +60,15 @@ def index(directory: str):
         indexed = 0
         for filepath in tqdm(new_files, desc="Indexing"):
             try:
-                duration = librosa.get_duration(path=filepath)
+                audio = load_audio(filepath)
             except Exception as e:
                 click.echo(f"  Skipping {filepath}: {e}", err=True)
                 continue
+            duration = len(audio) / SAMPLE_RATE
             if duration > max_sec:
                 debug(f"Skipping {filepath}: {duration/60:.1f}min > {MAX_DURATION_MINUTES}min limit", tag="index")
                 continue
-            try:
-                chunks = load_and_chunk(filepath)
-            except Exception as e:
-                click.echo(f"  Skipping {filepath}: {e}", err=True)
-                continue
+            chunks = chunk_audio(audio)
             chunk_arrays = [c for _, _, c in chunks]
             debug(f"{filepath}: {len(chunks)} chunks. RSS: {rss()}", tag="index")
             embeddings = get_audio_embeddings(chunk_arrays)
