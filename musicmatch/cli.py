@@ -233,6 +233,7 @@ def similar(filepath: str):
 @click.argument("amount", type=int, default=5, required=False)
 @click.option(
     "--all",
+    "-a",
     "all_flag",
     is_flag=True,
     help="Find similar songs for every entry in the queue",
