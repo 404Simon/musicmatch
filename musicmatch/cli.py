@@ -198,7 +198,13 @@ def similar(filepath: str):
 
 @cli.command()
 @click.argument("amount", type=int, default=5, required=False)
-def rmpc(amount: int):
+@click.option(
+    "--all",
+    "all_flag",
+    is_flag=True,
+    help="Find similar songs for every entry in the queue",
+)
+def rmpc(amount: int, all_flag: bool):
     """Find similar songs to the currently playing song and add them to the rmpc queue."""
     result = subprocess.run(["rmpc", "queue"], capture_output=True, text=True)
     if result.returncode != 0:
@@ -210,39 +216,55 @@ def rmpc(amount: int):
         click.echo("Queue is empty.", err=True)
         raise SystemExit(1)
 
-    rel_path = queue[0]["file"]
     mpd_root = os.path.expanduser(MPD_MUSIC_DIR)
-    abs_path = os.path.join(mpd_root, rel_path)
+    queue_files = {entry["file"] for entry in queue}
+    entries = queue if all_flag else [queue[0]]
 
+    all_scored = []
     init_db()
+
     with turso.connect(DB_PATH) as con:
-        avg_embedding = get_file_embedding(con, abs_path)
-        if avg_embedding is None:
-            if not os.path.exists(abs_path):
-                click.echo(f"File not in index and not found: {abs_path}", err=True)
-                raise SystemExit(1)
-            chunks = load_and_chunk(abs_path)
-            embeddings = get_audio_embeddings([c for _, _, c in chunks])
-            avg_embedding = np.mean(embeddings, axis=0)
+        for entry in entries:
+            rel_path = entry["file"]
+            abs_path = os.path.join(mpd_root, rel_path)
 
-        rows = db_search(con, avg_embedding, top_k=100, exclude_filepath=abs_path)
+            avg_embedding = get_file_embedding(con, abs_path)
+            if avg_embedding is None:
+                if not os.path.exists(abs_path):
+                    click.echo(f"File not in index and not found: {abs_path}", err=True)
+                    continue
+                chunks = load_and_chunk(abs_path)
+                embeddings = get_audio_embeddings([c for _, _, c in chunks])
+                avg_embedding = np.mean(embeddings, axis=0)
 
-    if not rows:
+            rows = db_search(con, avg_embedding, top_k=100, exclude_filepath=abs_path)
+            if not rows:
+                click.echo(f"No similar files found for {rel_path}.")
+                continue
+
+            scored = group_and_score(rows, amount)
+            scored = [
+                (fp, d)
+                for fp, d in scored
+                if not matchignore.is_ignored(os.path.relpath(fp, mpd_root))
+                and os.path.relpath(fp, mpd_root) not in queue_files
+            ]
+
+            if scored:
+                all_scored.extend(scored)
+
+    if not all_scored:
         click.echo("No similar files found.")
         return
 
-    scored = group_and_score(rows, amount)
-    scored = [
-        (fp, d)
-        for fp, d in scored
-        if not matchignore.is_ignored(os.path.relpath(fp, mpd_root))
-    ]
+    seen = set()
+    deduped = []
+    for fp, d in all_scored:
+        if fp not in seen:
+            seen.add(fp)
+            deduped.append((fp, d))
 
-    if not scored:
-        click.echo("No similar files found.")
-        return
-
-    rel_paths = [os.path.relpath(fp, mpd_root) for fp, _ in scored]
+    rel_paths = [os.path.relpath(fp, mpd_root) for fp, _ in deduped]
     subprocess.run(["rmpc", "add", *rel_paths])
     added = len(rel_paths)
     click.echo(f"Added {added} song(s) to queue.")
