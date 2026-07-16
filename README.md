@@ -18,3 +18,24 @@ CLI tool for music similarity search using CLAP embeddings and vector similarity
 | `MUSICMATCH_TOP_K` | `5` | Default number of results |
 | `MUSICMATCH_MPD_MUSIC_DIR` | `~/Music` | Music directory root for MPD |
 | `MUSICMATCH_MAX_DURATION_MINUTES` | `12` | Skip files longer than this when indexing |
+| `MUSICMATCH_MATCHIGNORE_PATH` | `~/.matchignore` | Path to the matchignore file |
+
+## `.matchignore`
+
+**Usage:** `musicmatch --no-ignore` disables it globally.
+
+Patterns that match a file's relative path exclude it from `index`, `search`, `similar`, and `rmpc` results.
+
+Format: one regex per line, blank lines and `#` comments ignored.
+
+```text
+# Exclude entire directories
+^coding/
+^lernen/
+
+# Exclude specific files
+theo_banenenbrot\.mp3$
+
+# Exclude by extension
+\.wav$
+```
