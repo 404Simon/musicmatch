@@ -3,7 +3,11 @@ import torch
 import numpy as np
 import transformers
 import huggingface_hub
-from transformers import AutoProcessor, ClapAudioModelWithProjection, ClapTextModelWithProjection
+from transformers import (
+    AutoProcessor,
+    ClapAudioModelWithProjection,
+    ClapTextModelWithProjection,
+)
 from musicmatch.config import MODEL_NAME, SAMPLE_RATE
 from musicmatch.debug import debug, rss
 
@@ -44,9 +48,7 @@ def get_text_embedding(text: str) -> np.ndarray:
 
 def get_audio_embeddings(audios: list[np.ndarray]) -> np.ndarray:
     _load(load_text=False)
-    inputs = _processor(
-        audio=audios, return_tensors="pt", sampling_rate=SAMPLE_RATE
-    )
+    inputs = _processor(audio=audios, return_tensors="pt", sampling_rate=SAMPLE_RATE)
     with torch.inference_mode():
         outputs = _audio_model(**inputs)
     return outputs.audio_embeds.numpy()

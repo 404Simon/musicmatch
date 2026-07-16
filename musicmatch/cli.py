@@ -8,23 +8,46 @@ import numpy as np
 import turso
 from tqdm import tqdm
 
+from musicmatch import matchignore
 from musicmatch.audio import load_audio, chunk_audio, load_and_chunk
-from musicmatch.config import AUDIO_EXTENSIONS, DB_PATH, MAX_DURATION_MINUTES, MPD_MUSIC_DIR, SAMPLE_RATE, TOP_K
-from musicmatch.db import get_file_embedding, group_and_score, init_db, insert_chunk, is_empty, search as db_search
+from musicmatch.config import (
+    AUDIO_EXTENSIONS,
+    DB_PATH,
+    MAX_DURATION_MINUTES,
+    MPD_MUSIC_DIR,
+    SAMPLE_RATE,
+    TOP_K,
+)
+from musicmatch.db import (
+    get_file_embedding,
+    group_and_score,
+    init_db,
+    insert_chunk,
+    is_empty,
+    search as db_search,
+)
 from musicmatch.debug import debug, rss, set_verbose as set_debug_verbose
 from musicmatch.model import get_audio_embeddings, get_text_embedding
 
 
 @click.group()
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug output")
-def cli(verbose: bool):
+@click.option("--no-ignore", is_flag=True, help="Disable .matchignore filtering")
+def cli(verbose: bool, no_ignore: bool):
     if verbose:
         set_debug_verbose(True)
         debug("Verbose mode enabled", tag="cli")
+    if no_ignore:
+        matchignore.set_enabled(False)
 
 
 @cli.command()
-@click.argument("directory", type=click.Path(exists=True, file_okay=False), default=os.path.expanduser("~/Music"), required=False)
+@click.argument(
+    "directory",
+    type=click.Path(exists=True, file_okay=False),
+    default=os.path.expanduser("~/Music"),
+    required=False,
+)
 def index(directory: str):
     debug(f"RSS at start: {rss()}", tag="index")
 
@@ -50,6 +73,11 @@ def index(directory: str):
         skipped = len(files) - len(new_files)
         if skipped:
             click.echo(f"Skipping {skipped} already-indexed files.")
+        new_files = [
+            f
+            for f in new_files
+            if not matchignore.is_ignored(os.path.relpath(f, directory))
+        ]
         if not new_files:
             click.echo("All files already indexed.")
             return
@@ -66,7 +94,10 @@ def index(directory: str):
                 continue
             duration = len(audio) / SAMPLE_RATE
             if duration > max_sec:
-                debug(f"Skipping {filepath}: {duration/60:.1f}min > {MAX_DURATION_MINUTES}min limit", tag="index")
+                debug(
+                    f"Skipping {filepath}: {duration / 60:.1f}min > {MAX_DURATION_MINUTES}min limit",
+                    tag="index",
+                )
                 continue
             chunks = chunk_audio(audio)
             chunk_arrays = [c for _, _, c in chunks]
@@ -115,8 +146,20 @@ def search(query: str):
         click.echo("No results found.")
         return
 
+    mpd_root = os.path.expanduser(MPD_MUSIC_DIR)
+    rows = [
+        r
+        for r in rows
+        if not matchignore.is_ignored(os.path.relpath(r["filepath"], mpd_root))
+    ]
+    if not rows:
+        click.echo("No results found.")
+        return
+
     for r in rows:
-        click.echo(f"{r['filepath']}  @ {r['start_time']:.1f}s  (distance: {r['distance']:.4f})")
+        click.echo(
+            f"{r['filepath']}  @ {r['start_time']:.1f}s  (distance: {r['distance']:.4f})"
+        )
 
 
 @cli.command()
@@ -138,6 +181,16 @@ def similar(filepath: str):
         return
 
     scored = group_and_score(rows, TOP_K)
+    mpd_root = os.path.expanduser(MPD_MUSIC_DIR)
+    scored = [
+        (fp, d)
+        for fp, d in scored
+        if not matchignore.is_ignored(os.path.relpath(fp, mpd_root))
+    ]
+
+    if not scored:
+        click.echo("No similar files found.")
+        return
 
     for fp, d in scored:
         click.echo(f"{fp}  (distance: {d:.4f})")
@@ -179,6 +232,11 @@ def rmpc(amount: int):
         return
 
     scored = group_and_score(rows, amount)
+    scored = [
+        (fp, d)
+        for fp, d in scored
+        if not matchignore.is_ignored(os.path.relpath(fp, mpd_root))
+    ]
 
     if not scored:
         click.echo("No similar files found.")

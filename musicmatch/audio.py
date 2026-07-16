@@ -8,18 +8,23 @@ from musicmatch.config import SAMPLE_RATE, CHUNK_SAMPLES, CHUNK_SECONDS
 def load_audio(filepath: str, sr: int = SAMPLE_RATE) -> np.ndarray:
     cmd = [
         "ffmpeg",
-        "-i", filepath,
-        "-f", "f32le",
-        "-ac", "1",
-        "-ar", str(sr),
+        "-i",
+        filepath,
+        "-f",
+        "f32le",
+        "-ac",
+        "1",
+        "-ar",
+        str(sr),
         "-hide_banner",
-        "-loglevel", "error",
+        "-loglevel",
+        "error",
         "-",
     ]
     proc = subprocess.run(cmd, capture_output=True, check=True)
     audio = np.frombuffer(proc.stdout, dtype=np.float32)
     if len(audio) == 0:
-        raise RuntimeError(f"ffmpeg produced no audio data")
+        raise RuntimeError("ffmpeg produced no audio data")
     return audio
 
 

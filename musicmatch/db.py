@@ -64,9 +64,7 @@ def search(
     sql += " ORDER BY distance ASC LIMIT ?"
     params.append(top_k)
     rows = cur.execute(sql, params).fetchall()
-    return [
-        {"filepath": r[0], "start_time": r[1], "distance": r[2]} for r in rows
-    ]
+    return [{"filepath": r[0], "start_time": r[1], "distance": r[2]} for r in rows]
 
 
 def is_empty(con) -> bool:
@@ -74,9 +72,7 @@ def is_empty(con) -> bool:
     return row[0] == 0
 
 
-def group_and_score(
-    results: list[dict], top_k: int = 5
-) -> list[tuple[str, float]]:
+def group_and_score(results: list[dict], top_k: int = 5) -> list[tuple[str, float]]:
     groups: dict[str, list[float]] = {}
     for r in results:
         groups.setdefault(r["filepath"], []).append(r["distance"])
