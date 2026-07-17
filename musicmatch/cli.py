@@ -311,3 +311,30 @@ def rmpc(amount: int, all_flag: bool):
     subprocess.run(["rmpc", "add", *rel_paths])
     added = len(rel_paths)
     click.echo(f"Added {added} song(s) to queue.")
+
+
+@cli.command()
+@click.option("--output", "-o", default="musicmatch_3d.html", help="Output HTML path")
+@click.option("--limit", "-n", type=int, default=None, help="Randomly sample N songs")
+def visualize(output: str, limit: int | None):
+    from musicmatch.db import init_db, is_empty
+    from musicmatch.viz import get_all_file_embeddings, pca, scatter_3d
+    import turso
+
+    init_db()
+    with turso.connect(DB_PATH) as con:
+        if is_empty(con):
+            click.echo("No files indexed yet. Run `musicmatch index` first.")
+            return
+        filepaths, embeddings = get_all_file_embeddings(con)
+
+    if len(filepaths) < 3:
+        click.echo("Need at least 3 songs for 3D visualization.")
+        return
+
+    click.echo(f"Reducing {len(filepaths)} songs from 512D to 3D via PCA...")
+    coords = pca(embeddings, n_components=3)
+
+    click.echo(f"Rendering interactive 3D plot to {output} ...")
+    scatter_3d(coords, filepaths, output, limit=limit)
+    click.echo(f"Done. Open {output} in your browser.")
