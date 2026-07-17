@@ -3,21 +3,24 @@ from jinja2 import Environment
 
 import numpy as np
 
-from musicmatch.config import DB_PATH, MPD_MUSIC_DIR
+from musicmatch.config import MPD_MUSIC_DIR
 
 
 def get_all_file_embeddings(con):
     rows = (
         con.cursor()
         .execute(
-            "SELECT filepath, embedding FROM track_chunks ORDER BY filepath, chunk_index"
+            """SELECT f.path, c.chunk_index, c.embedding
+               FROM files f
+               JOIN chunks c ON c.chromaprint_id = f.chromaprint_id
+               ORDER BY f.path, c.chunk_index"""
         )
         .fetchall()
     )
 
     sums = {}
     counts = {}
-    for fp, emb_blob in rows:
+    for fp, _, emb_blob in rows:
         emb = np.frombuffer(emb_blob, dtype=np.float32)
         if fp not in sums:
             sums[fp] = emb.copy()
@@ -68,7 +71,6 @@ _COLORS = [
 def scatter_3d(coords, filepaths, output_path, limit=None):
     try:
         import plotly.graph_objects as go
-        import plotly.express as px
     except ImportError:
         raise ImportError("plotly is required — run: uv pip install plotly")
 
@@ -130,13 +132,10 @@ def scatter_3d(coords, filepaths, output_path, limit=None):
 
     template_path = Path(__file__).parent / "templates" / "visualization.html"
     env = Environment()
-    html = (
-        env.from_string(template_path.read_text(encoding="utf-8"))
-        .render(
-            plot_json=plot_json,
-            filepaths=filepaths,
-            colors=colors,
-        )
+    html = env.from_string(template_path.read_text(encoding="utf-8")).render(
+        plot_json=plot_json,
+        filepaths=filepaths,
+        colors=colors,
     )
 
     Path(output_path).write_text(html, encoding="utf-8")

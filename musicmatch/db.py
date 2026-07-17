@@ -1,7 +1,6 @@
 import numpy as np
 
-from musicmatch.config import DB_PATH
-from musicmatch import hash as hashmod
+from musicmatch.config import DB_PATH, EMBEDDING_DIM
 
 
 def init_db():
@@ -9,69 +8,89 @@ def init_db():
 
     with turso.connect(DB_PATH) as con:
         cur = con.cursor()
+        cur.execute("PRAGMA foreign_keys = ON")
+        cur.execute("DROP TABLE IF EXISTS track_chunks")
+        cur.execute("DROP TABLE IF EXISTS track_hashes")
+        cur.execute("""CREATE TABLE IF NOT EXISTS chromaprints (
+            id    INTEGER PRIMARY KEY,
+            hash  TEXT UNIQUE
+        )""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS files (
+            id             INTEGER PRIMARY KEY,
+            chromaprint_id INTEGER NOT NULL REFERENCES chromaprints(id) ON DELETE RESTRICT,
+            path           TEXT NOT NULL UNIQUE,
+            duration       REAL
+        )""")
+        cur.execute(f"""CREATE TABLE IF NOT EXISTS chunks (
+            id             INTEGER PRIMARY KEY,
+            chromaprint_id INTEGER NOT NULL REFERENCES chromaprints(id) ON DELETE CASCADE,
+            chunk_index    INTEGER NOT NULL,
+            embedding      F32_BLOB({EMBEDDING_DIM}),
+            UNIQUE(chromaprint_id, chunk_index)
+        )""")
         cur.execute(
-            """CREATE TABLE IF NOT EXISTS track_chunks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                filepath TEXT NOT NULL,
-                chunk_index INTEGER NOT NULL,
-                start_time REAL NOT NULL,
-                embedding F32_BLOB(512)
-            )"""
+            "CREATE INDEX IF NOT EXISTS idx_files_chromaprint_id ON files(chromaprint_id)"
         )
-        hashmod.init_hash_table(con)
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_chromaprint_id ON chunks(chromaprint_id)"
+        )
         con.commit()
 
 
-def insert_chunk(
-    con,
-    filepath: str,
-    chunk_index: int,
-    start_time: float,
-    embedding,
-):
-    embedding_json = str(embedding.tolist())
-    cur = con.cursor()
-    cur.execute(
-        "INSERT INTO track_chunks (filepath, chunk_index, start_time, embedding) VALUES (?, ?, ?, vector32(?))",
-        (filepath, chunk_index, start_time, embedding_json),
+def insert_chunk(con, chromaprint_id: int, chunk_index: int, embedding):
+    con.cursor().execute(
+        "INSERT INTO chunks (chromaprint_id, chunk_index, embedding) VALUES (?, ?, vector32(?))",
+        (chromaprint_id, chunk_index, str(embedding.tolist())),
     )
 
 
-def get_file_embedding(con, filepath: str) -> np.ndarray | None:
+def is_empty(con) -> bool:
+    row = con.cursor().execute("SELECT COUNT(*) FROM files").fetchone()
+    return row[0] == 0
+
+
+def search(con, query_embedding, top_k: int = 5) -> list[dict]:
+    embedding_json = str(query_embedding.tolist())
+    cur = con.cursor()
+
+    sql = """SELECT f.path, c.chunk_index * 10.0 AS start_time,
+                    c.chromaprint_id,
+                    vector_distance_cos(c.embedding, vector32(?)) AS distance
+             FROM chunks c
+             JOIN files f ON f.chromaprint_id = c.chromaprint_id
+                      AND f.id = (SELECT MIN(f2.id) FROM files f2 WHERE f2.chromaprint_id = c.chromaprint_id)
+             ORDER BY distance ASC LIMIT ?"""
+
+    rows = cur.execute(sql, [embedding_json, top_k]).fetchall()
+    return [
+        {"filepath": r[0], "start_time": r[1], "chromaprint_id": r[2], "distance": r[3]}
+        for r in rows
+    ]
+
+
+def get_file_embedding(con, filepath: str):
+    row = (
+        con.cursor()
+        .execute("SELECT chromaprint_id FROM files WHERE path = ?", [filepath])
+        .fetchone()
+    )
+    if not row:
+        return None
+    chromaprint_id = row[0]
+
     rows = (
         con.cursor()
         .execute(
-            "SELECT embedding FROM track_chunks WHERE filepath = ? ORDER BY chunk_index",
-            [filepath],
+            "SELECT embedding FROM chunks WHERE chromaprint_id = ? ORDER BY chunk_index",
+            [chromaprint_id],
         )
         .fetchall()
     )
     if not rows:
         return None
+
     embeddings = np.array([np.frombuffer(r[0], dtype=np.float32) for r in rows])
     return np.mean(embeddings, axis=0)
-
-
-def search(
-    con, query_embedding, top_k: int = 5, exclude_filepath: str | None = None
-) -> list[dict]:
-    embedding_json = str(query_embedding.tolist())
-    cur = con.cursor()
-    sql = """SELECT filepath, start_time, vector_distance_cos(embedding, vector32(?)) AS distance
-             FROM track_chunks"""
-    params: list = [embedding_json]
-    if exclude_filepath:
-        sql += " WHERE filepath != ?"
-        params.append(exclude_filepath)
-    sql += " ORDER BY distance ASC LIMIT ?"
-    params.append(top_k)
-    rows = cur.execute(sql, params).fetchall()
-    return [{"filepath": r[0], "start_time": r[1], "distance": r[2]} for r in rows]
-
-
-def is_empty(con) -> bool:
-    row = con.cursor().execute("SELECT COUNT(*) FROM track_chunks").fetchone()
-    return row[0] == 0
 
 
 def group_and_score(results: list[dict], top_k: int = 5) -> list[tuple[str, float]]:

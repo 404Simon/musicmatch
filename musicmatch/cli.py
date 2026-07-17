@@ -36,7 +36,12 @@ def cli(verbose: bool, no_ignore: bool):
     default=os.path.expanduser("~/Music"),
     required=False,
 )
-def index(directory: str):
+@click.option(
+    "--full",
+    is_flag=True,
+    help="Delete all data and re-index from scratch",
+)
+def index(directory: str, full: bool):
     from musicmatch import hash as hashmod
     from musicmatch import matchignore
     from musicmatch.audio import load_audio, chunk_audio
@@ -59,30 +64,39 @@ def index(directory: str):
     init_db()
 
     with turso.connect(DB_PATH) as con:
-        missing_hash = hashmod.get_filepaths_missing_hashes(con)
-        if missing_hash:
-            click.echo(f"Backfilling hashes for {len(missing_hash)} file(s)...")
-            for fp in tqdm(missing_hash, desc="Backfilling hashes"):
-                fp_hash = hashmod.compute_fingerprint(fp)
-                if fp_hash:
-                    hashmod.store_hash(con, fp, fp_hash)
+        if full:
+            click.echo("Full re-index: clearing all data...")
+            con.cursor().execute("DELETE FROM chunks")
+            con.cursor().execute("DELETE FROM files")
+            con.cursor().execute("DELETE FROM chromaprints")
             con.commit()
 
-        existing = {
-            r[0]
-            for r in con.cursor()
-            .execute("SELECT DISTINCT filepath FROM track_chunks")
-            .fetchall()
+        abs_dir = os.path.abspath(directory)
+        scanned = set(files)
+
+        known = {
+            r[0] for r in con.cursor().execute("SELECT path FROM files").fetchall()
         }
-        new_files = sorted(f for f in files if f not in existing)
-        skipped = len(files) - len(new_files)
-        if skipped:
-            click.echo(f"Skipping {skipped} already-indexed files.")
-        new_files = [
+
+        stale = [p for p in known if p.startswith(abs_dir + "/") and p not in scanned]
+        if stale:
+            click.echo(f"Pruning {len(stale)} stale file(s)...")
+            for path in stale:
+                con.cursor().execute("DELETE FROM files WHERE path = ?", [path])
+            con.cursor().execute(
+                "DELETE FROM chromaprints WHERE id NOT IN (SELECT chromaprint_id FROM files)"
+            )
+            con.cursor().execute(
+                "DELETE FROM chunks WHERE chromaprint_id NOT IN (SELECT id FROM chromaprints)"
+            )
+            con.commit()
+
+        new_files = sorted(
             f
-            for f in new_files
-            if not matchignore.is_ignored(os.path.relpath(f, directory))
-        ]
+            for f in files
+            if f not in known
+            and not matchignore.is_ignored(os.path.relpath(f, directory))
+        )
         if not new_files:
             click.echo("All files already indexed.")
             return
@@ -91,12 +105,26 @@ def index(directory: str):
 
         max_sec = MAX_DURATION_MINUTES * 60
         indexed = 0
+
         for filepath in tqdm(new_files, desc="Indexing"):
             fp_hash = hashmod.compute_fingerprint(filepath)
+
             if fp_hash:
-                dup = hashmod.get_filepath_by_hash(con, fp_hash)
-                if dup and dup != filepath:
-                    click.echo(f"  Skipping {filepath}: duplicate of {dup}", err=True)
+                existing = (
+                    con.cursor()
+                    .execute(
+                        "SELECT c.id FROM chromaprints c JOIN chunks ch ON ch.chromaprint_id = c.id WHERE c.hash = ? LIMIT 1",
+                        [fp_hash],
+                    )
+                    .fetchone()
+                )
+                if existing:
+                    con.cursor().execute(
+                        "INSERT INTO files (chromaprint_id, path) VALUES (?, ?)",
+                        (existing[0], filepath),
+                    )
+                    con.commit()
+                    indexed += 1
                     continue
 
             try:
@@ -104,6 +132,7 @@ def index(directory: str):
             except Exception as e:
                 click.echo(f"  Skipping {filepath}: {e}", err=True)
                 continue
+
             duration = len(audio) / SAMPLE_RATE
             if duration > max_sec:
                 debug(
@@ -111,14 +140,25 @@ def index(directory: str):
                     tag="index",
                 )
                 continue
+
+            if fp_hash:
+                chromaprint_id = hashmod.find_or_create(con, fp_hash)
+            else:
+                con.cursor().execute("INSERT INTO chromaprints (hash) VALUES (NULL)")
+                chromaprint_id = con.cursor().lastrowid
+
+            con.cursor().execute(
+                "INSERT INTO files (chromaprint_id, path, duration) VALUES (?, ?, ?)",
+                (chromaprint_id, filepath, duration),
+            )
+
             chunks = chunk_audio(audio)
             chunk_arrays = [c for _, _, c in chunks]
             debug(f"{filepath}: {len(chunks)} chunks. RSS: {rss()}", tag="index")
             embeddings = get_audio_embeddings(chunk_arrays)
-            for (chunk_idx, start_time, _), emb in zip(chunks, embeddings):
-                insert_chunk(con, filepath, chunk_idx, start_time, emb)
-            if fp_hash:
-                hashmod.store_hash(con, filepath, fp_hash)
+            for (chunk_idx, _, _), emb in zip(chunks, embeddings):
+                insert_chunk(con, chromaprint_id, chunk_idx, emb)
+
             con.commit()
             indexed += 1
 
@@ -136,7 +176,11 @@ def list_files():
         rows = (
             con.cursor()
             .execute(
-                "SELECT filepath, COUNT(*) as chunks FROM track_chunks GROUP BY filepath ORDER BY filepath"
+                """SELECT f.path, COUNT(c.id) AS chunks
+                   FROM files f
+                   LEFT JOIN chunks c ON c.chromaprint_id = f.chromaprint_id
+                   GROUP BY f.id
+                   ORDER BY f.path"""
             )
             .fetchall()
         )
@@ -192,20 +236,40 @@ def similar(filepath: str):
     from musicmatch import hash as hashmod
     from musicmatch import matchignore
     from musicmatch.audio import load_and_chunk
-    from musicmatch.db import init_db, is_empty, search as db_search, group_and_score
+    from musicmatch.db import (
+        init_db,
+        is_empty,
+        search as db_search,
+        group_and_score,
+        get_file_embedding,
+    )
     from musicmatch.model import get_audio_embeddings
     import turso
 
     init_db()
-    chunks = load_and_chunk(filepath)
-    embeddings = get_audio_embeddings([c for _, _, c in chunks])
-    avg_embedding = np.mean(embeddings, axis=0)
 
     with turso.connect(DB_PATH) as con:
         if is_empty(con):
             click.echo("No files indexed yet. Run `musicmatch index` first.")
             return
-        rows = db_search(con, avg_embedding, top_k=100, exclude_filepath=filepath)
+
+        avg_embedding = get_file_embedding(con, filepath)
+
+    if avg_embedding is None:
+        chunks = load_and_chunk(filepath)
+        embeddings = get_audio_embeddings([c for _, _, c in chunks])
+        avg_embedding = np.mean(embeddings, axis=0)
+
+    with turso.connect(DB_PATH) as con:
+        rows = db_search(con, avg_embedding, top_k=100)
+
+        query_cid = (
+            con.cursor()
+            .execute("SELECT chromaprint_id FROM files WHERE path = ?", [filepath])
+            .fetchone()
+        )
+        if query_cid:
+            rows = [r for r in rows if r["chromaprint_id"] != query_cid[0]]
 
         if not rows:
             click.echo("No similar files found.")
@@ -285,7 +349,16 @@ def rmpc(amount: int, all_flag: bool):
                 embeddings = get_audio_embeddings([c for _, _, c in chunks])
                 avg_embedding = np.mean(embeddings, axis=0)
 
-            rows = db_search(con, avg_embedding, top_k=100, exclude_filepath=abs_path)
+            rows = db_search(con, avg_embedding, top_k=100)
+
+            query_cid = (
+                con.cursor()
+                .execute("SELECT chromaprint_id FROM files WHERE path = ?", [abs_path])
+                .fetchone()
+            )
+            if query_cid:
+                rows = [r for r in rows if r["chromaprint_id"] != query_cid[0]]
+
             if not rows:
                 click.echo(f"No similar files found for {rel_path}.")
                 continue
